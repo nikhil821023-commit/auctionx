@@ -1,5 +1,6 @@
 package com.auctionx.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -18,33 +19,33 @@ public class Player {
     @Column(nullable = false)
     private String name;
 
-    private String role;             // Batsman, Bowler, All-Rounder, WK
+    private String role;
     private String nationality;
     private Integer age;
     private String photoPath;
 
-    // Stats
     private Integer matches;
     private Double average;
     private Double strikeRate;
-
     private Double basePrice;
 
     @Enumerated(EnumType.STRING)
-    private PlayerTier tier;         // PLATINUM, GOLD, SILVER, BRONZE
+    private PlayerTier tier;
 
     @Enumerated(EnumType.STRING)
-    private PlayerStatus status;     // AVAILABLE, SOLD, UNSOLD
+    private PlayerStatus status;
 
     private Double soldPrice;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "tournament_id", nullable = false)
+    @JsonIgnoreProperties({"players", "teams", "hibernateLazyInitializer", "handler"})
     private Tournament tournament;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "team_id")
-    private Team team;               // null until sold
+    @JsonIgnoreProperties({"players", "tournament", "hibernateLazyInitializer", "handler"})
+    private Team team;
 
     public enum PlayerTier {
         PLATINUM, GOLD, SILVER, BRONZE

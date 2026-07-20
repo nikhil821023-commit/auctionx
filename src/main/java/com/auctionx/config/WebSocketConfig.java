@@ -14,7 +14,9 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
         registry.enableSimpleBroker(
                 "/topic/lobby",    // lobby updates (teams joining, ready status)
                 "/topic/auction",  // Phase 3 - auction events
-                "/topic/dashboard" // Phase 3 - live dashboard
+                "/topic/dashboard", // Phase 3 - live dashboard
+                "/topic/spectators",
+                "/topic/reactions"
         );
         // Client → Server messages use this prefix
         registry.setApplicationDestinationPrefixes("/app");

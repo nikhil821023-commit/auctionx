@@ -41,6 +41,15 @@ public class AuctionResult {
 
     private LocalDateTime soldAt;
 
+
+    @Column(length = 2000)
+    private String bidTimeline;
+
+    private Long   winnerTeamId;      // redundant but fast lookup
+    private Double openingBid;        // first bid placed
+    private Double finalBid;          // last/winning bid
+    private Integer auctionDuration;
+
     public enum ResultStatus {
         SOLD, UNSOLD
     }

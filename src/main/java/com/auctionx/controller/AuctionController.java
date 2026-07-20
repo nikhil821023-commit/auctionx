@@ -2,13 +2,16 @@ package com.auctionx.controller;
 
 import com.auctionx.dto.*;
 import com.auctionx.model.AuctionState;
+import com.auctionx.model.BidMode;
 import com.auctionx.service.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/auction")
 @RequiredArgsConstructor
@@ -19,146 +22,228 @@ public class AuctionController {
     private final DashboardService     dashboardService;
     private final LobbyService         lobbyService;
 
-    /**
-     * POST /api/auction/{tournamentId}/init
-     * Called right after lobby start — initialises engine
-     */
     @PostMapping("/{tournamentId}/init")
     public ResponseEntity<Map<String, Object>> initAuction(
             @PathVariable Long tournamentId) {
+        try {
+            // ✅ getSettings NEVER throws — always returns defaults
+            AuctionSettingsDTO settings = lobbyService.getSettings(tournamentId);
+            AuctionState state = auctionEngine.initAuction(tournamentId, settings);
 
-        AuctionSettingsDTO settings = lobbyService.getSettings(tournamentId);
-        AuctionState state = auctionEngine.initAuction(tournamentId, settings);
+            return ResponseEntity.ok(Map.of(
+                    "status",       "AUCTION_READY",
+                    "tournamentId", tournamentId,
+                    "totalPlayers", state.getRemainingPlayers().size(),
+                    "bidTimer",     state.getTotalTimerSeconds(),
+                    "autoSpin",     state.getAutoSpin() != null && state.getAutoSpin()
+            ));
 
-        return ResponseEntity.ok(Map.of(
-                "status",          "AUCTION_READY",
-                "tournamentId",    tournamentId,
-                "totalPlayers",    state.getRemainingPlayers().size(),
-                "bidTimer",        state.getTotalTimerSeconds(),
-                "autoSpin",        state.getAutoSpin()
-        ));
+        } catch (Exception e) {
+            log.error("Auction init failed for tournament {}: {}", tournamentId, e.getMessage());
+            // ✅ Return 200 with error key so frontend catch block reads it cleanly
+            return ResponseEntity.ok(Map.of(
+                    "status", "INIT_FAILED",
+                    "error",  e.getMessage() != null ? e.getMessage() : "Unknown error"
+            ));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/spin
-     * Organiser spins the wheel
-     */
     @PostMapping("/{tournamentId}/spin")
-    public ResponseEntity<SpinResultDTO> spin(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(auctionEngine.spinWheel(tournamentId));
+    public ResponseEntity<?> spin(@PathVariable Long tournamentId) {
+        try {
+            return ResponseEntity.ok(auctionEngine.spinWheel(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/start-bidding
-     * Organiser starts bidding after player reveal
-     */
     @PostMapping("/{tournamentId}/start-bidding")
-    public ResponseEntity<Map<String, String>> startBidding(
-            @PathVariable Long tournamentId) {
-        auctionEngine.startBidding(tournamentId);
-        return ResponseEntity.ok(Map.of("status", "BIDDING_OPEN"));
+    public ResponseEntity<?> startBidding(@PathVariable Long tournamentId) {
+        try {
+            auctionEngine.startBidding(tournamentId);
+            return ResponseEntity.ok(Map.of("status", "BIDDING_OPEN"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/bid
-     * Organiser taps a captain's button to place their bid
-     */
     @PostMapping("/{tournamentId}/bid")
-    public ResponseEntity<AuctionStateDTO> placeBid(
+    public ResponseEntity<?> placeBid(
             @PathVariable Long tournamentId,
             @RequestBody BidRequestDTO dto) {
-        dto.setTournamentId(tournamentId);
-        return ResponseEntity.ok(auctionEngine.placeBid(dto));
+        try {
+            dto.setTournamentId(tournamentId);
+            return ResponseEntity.ok(auctionEngine.placeBid(dto));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
     /**
-     * POST /api/auction/{tournamentId}/sold
-     * Organiser manually triggers sold (before timer ends)
+     * POST /api/auction/{tournamentId}/self-bid
+     * Called by CAPTAIN from their own screen (Mode 2)
      */
+    @PostMapping("/{tournamentId}/self-bid")
+    public ResponseEntity<?> selfBid(
+            @PathVariable Long tournamentId,
+            @RequestBody BidRequestDTO dto) {
+        try {
+            dto.setTournamentId(tournamentId);
+            dto.setBidMode(BidMode.CAPTAIN_SELF);
+            return ResponseEntity.ok(auctionEngine.placeBid(dto));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/auction/{tournamentId}/captain-token?teamId=5
+     * Captain fetches their token once after joining
+     */
+    @GetMapping("/{tournamentId}/captain-token")
+    public ResponseEntity<?> getCaptainToken(
+            @PathVariable Long tournamentId,
+            @RequestParam Long teamId) {
+        try {
+            String token = auctionEngine.generateCaptainToken(teamId, tournamentId);
+            return ResponseEntity.ok(Map.of(
+                    "token",        token,
+                    "teamId",       teamId,
+                    "tournamentId", tournamentId
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/auction/{tournamentId}/bid-mode
+     * Returns which mode is active for this tournament
+     */
+    @GetMapping("/{tournamentId}/bid-mode")
+    public ResponseEntity<?> getBidMode(@PathVariable Long tournamentId) {
+        try {
+            AuctionState state = auctionEngine.getState(tournamentId);
+            return ResponseEntity.ok(Map.of(
+                    "bidMode", state.getBidMode() != null
+                            ? state.getBidMode().name()
+                            : "ORGANIZER_CONTROLLED"
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of("bidMode", "ORGANIZER_CONTROLLED"));
+        }
+    }
+
+    /**
+     * POST /api/auction/{tournamentId}/set-bid-mode
+     * Organiser switches mode mid-auction if needed
+     */
+    @PostMapping("/{tournamentId}/set-bid-mode")
+    public ResponseEntity<?> setBidMode(
+            @PathVariable Long tournamentId,
+            @RequestParam String mode) {
+        try {
+            BidMode bidMode = BidMode.valueOf(mode);
+            auctionEngine.setBidMode(tournamentId, bidMode);
+            return ResponseEntity.ok(Map.of("bidMode", mode));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
     @PostMapping("/{tournamentId}/sold")
-    public ResponseEntity<AuctionStateDTO> sold(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(auctionEngine.soldPlayer(tournamentId));
+    public ResponseEntity<?> sold(@PathVariable Long tournamentId) {
+        try {
+            return ResponseEntity.ok(auctionEngine.soldPlayer(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/unsold
-     * Organiser marks current player unsold
-     */
     @PostMapping("/{tournamentId}/unsold")
-    public ResponseEntity<AuctionStateDTO> unsold(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(auctionEngine.markUnsold(tournamentId));
+    public ResponseEntity<?> unsold(@PathVariable Long tournamentId) {
+        try {
+            return ResponseEntity.ok(auctionEngine.markUnsold(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/pause
-     */
     @PostMapping("/{tournamentId}/pause")
-    public ResponseEntity<Map<String, String>> pause(@PathVariable Long tournamentId) {
-        auctionEngine.pauseAuction(tournamentId);
-        return ResponseEntity.ok(Map.of("status", "PAUSED"));
+    public ResponseEntity<?> pause(@PathVariable Long tournamentId) {
+        try {
+            auctionEngine.pauseAuction(tournamentId);
+            return ResponseEntity.ok(Map.of("status", "PAUSED"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/resume
-     */
     @PostMapping("/{tournamentId}/resume")
-    public ResponseEntity<Map<String, String>> resume(@PathVariable Long tournamentId) {
-        auctionEngine.resumeAuction(tournamentId);
-        return ResponseEntity.ok(Map.of("status", "RESUMED"));
+    public ResponseEntity<?> resume(@PathVariable Long tournamentId) {
+        try {
+            auctionEngine.resumeAuction(tournamentId);
+            return ResponseEntity.ok(Map.of("status", "RESUMED"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/re-auction
-     * Move all unsold players back to pool and restart
-     */
     @PostMapping("/{tournamentId}/re-auction")
-    public ResponseEntity<SpinResultDTO> reAuction(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(auctionEngine.startReAuction(tournamentId));
+    public ResponseEntity<?> reAuction(@PathVariable Long tournamentId) {
+        try {
+            return ResponseEntity.ok(auctionEngine.startReAuction(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * POST /api/auction/{tournamentId}/complete
-     * Organiser manually closes the auction
-     */
     @PostMapping("/{tournamentId}/complete")
-    public ResponseEntity<Map<String, String>> complete(@PathVariable Long tournamentId) {
-        auctionEngine.completeAuction(tournamentId);
-        return ResponseEntity.ok(Map.of("status", "AUCTION_COMPLETED"));
+    public ResponseEntity<?> complete(@PathVariable Long tournamentId) {
+        try {
+            auctionEngine.completeAuction(tournamentId);
+            return ResponseEntity.ok(Map.of("status", "AUCTION_COMPLETED"));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * GET /api/auction/{tournamentId}/dashboard
-     * Poll dashboard anytime
-     */
     @GetMapping("/{tournamentId}/dashboard")
-    public ResponseEntity<DashboardDTO> getDashboard(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(dashboardService.buildDashboard(tournamentId));
+    public ResponseEntity<?> getDashboard(@PathVariable Long tournamentId) {
+        try {
+            return ResponseEntity.ok(dashboardService.buildDashboard(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 
-    /**
-     * GET /api/auction/{tournamentId}/state
-     * Get current engine state snapshot
-     */
     @GetMapping("/{tournamentId}/state")
-    public ResponseEntity<AuctionStateDTO> getState(@PathVariable Long tournamentId) {
-        AuctionState state = auctionEngine.getState(tournamentId);
-        return ResponseEntity.ok(Map.of(
-                "phase",            state.getPhase(),
-                "playersRemaining", state.getRemainingPlayers().size(),
-                "playersUnsold",    state.getUnsoldPlayers().size(),
-                "currentBid",       state.getCurrentBid() != null ? state.getCurrentBid() : 0
-        )).getClass() == null ? null : ResponseEntity.ok(null); // replaced below
-        // proper return:
+    public ResponseEntity<?> getState(@PathVariable Long tournamentId) {
+        try {
+            AuctionState state = auctionEngine.getState(tournamentId);
+            return ResponseEntity.ok(Map.of(
+                    "phase",            state.getPhase().name(),
+                    "playersRemaining", state.getRemainingPlayers().size(),
+                    "playersUnsold",    state.getUnsoldPlayers().size(),
+                    "currentBid",       state.getCurrentBid() != null ? state.getCurrentBid() : 0,
+                    "isPaused",         state.getIsPaused().get(),
+                    "isRunning",        state.getIsRunning().get()
+            ));
+        } catch (Exception e) {
+            return ResponseEntity.ok(Map.of(
+                    "phase", "IDLE", "playersRemaining", 0,
+                    "playersUnsold", 0, "currentBid", 0,
+                    "isPaused", false, "isRunning", false
+            ));
+        }
     }
 
-    /**
-     * GET /api/auction/{tournamentId}/results
-     * All sold/unsold results for this tournament
-     */
     @GetMapping("/{tournamentId}/results")
     public ResponseEntity<?> getResults(@PathVariable Long tournamentId) {
-        return ResponseEntity.ok(
-                dashboardService.buildDashboard(tournamentId)
-        );
+        try {
+            return ResponseEntity.ok(dashboardService.buildDashboard(tournamentId));
+        } catch (Exception e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
     }
 }

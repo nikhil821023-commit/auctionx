@@ -1,5 +1,6 @@
 package com.auctionx.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.persistence.*;
 import lombok.*;
 import java.util.List;
@@ -22,23 +23,27 @@ public class Team {
     private String captainName;
     private String captainEmail;
     private String captainPhone;
-    private String teamColor;         // hex color code
+    private String teamColor;
     private String logoPath;
 
     private Double totalBudget;
-    private Double spentBudget;       // updated during auction
+    private Double spentBudget;
     private Double remainingBudget;
 
+    // ✅ Ignore tournament back-reference in JSON to prevent circular loop
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "tournament_id", nullable = false)
+    @JsonIgnoreProperties({"teams", "players", "hibernateLazyInitializer"})
     private Tournament tournament;
 
+    // ✅ Ignore player list in JSON — not needed in team listing
     @OneToMany(mappedBy = "team", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
-    private List<Player> players;     // players won at auction
+    @JsonIgnoreProperties({"team", "tournament", "hibernateLazyInitializer"})
+    private List<Player> players;
 
     @PrePersist
     public void initBudget() {
-        if (this.spentBudget == null) this.spentBudget = 0.0;
+        if (this.spentBudget == null)    this.spentBudget = 0.0;
         if (this.remainingBudget == null) this.remainingBudget = this.totalBudget;
     }
 }

@@ -3,6 +3,7 @@ package com.auctionx.model;
 import jakarta.persistence.*;
 import lombok.*;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Entity
@@ -17,30 +18,75 @@ public class Tournament {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false, name = "name")
     private String name;
 
-    private String sportType;         // cricket, football, etc.
+    private String    sportType;
     private LocalDate tournamentDate;
-    private String logoPath;          // stored file path
+    private String    logoPath;
 
-    private Double teamBudget;        // default budget per team
+    private Double  teamBudget;
     private Integer maxPlayersPerTeam;
-    private Double basePrice;         // default base bid price
-    private Double bidIncrement;      // e.g. 10.0
+    private Double  basePrice;
+    private Double  bidIncrement;
 
     @Enumerated(EnumType.STRING)
-    private TournamentStatus status;  // SETUP, LOBBY, LIVE, COMPLETED
+    private TournamentStatus status;
 
-    private String joinCode;          // unique 6-char code for captains
+    private String joinCode;
 
-    @OneToMany(mappedBy = "tournament", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    // ── NEW: Scheduling fields ─────────────────────────────────
+    private LocalDateTime scheduledAuctionTime;  // when auction auto-opens
+    private LocalDateTime expiresAt;             // auto-delete/expire after
+    private Integer       reservedDays;          // how many days to keep (1-7)
+    private String        organizerEmail;        // for reminder emails
+    private String        organizerName;
+    private Boolean       autoStartEnabled;      // auto-open lobby at scheduled time
+    private String        postponeReason;        // optional reason for delay
+    private LocalDateTime lastPostponedAt;       // when last postponed
+    private Integer       postponeCount;         // how many times postponed
+    private Boolean       reminderSent24h;       // tracking reminders
+    private Boolean       reminderSent1h;
+
+    private Long createdByUserId;
+    private String createdByName;
+    private String createdByEmail;
+
+    @Enumerated(EnumType.STRING)
+    private TournamentStatus previousStatus;     // before postpone
+
+    @OneToMany(mappedBy = "tournament",
+            cascade = CascadeType.ALL,
+            fetch = FetchType.LAZY)
     private List<Team> teams;
 
-    @OneToMany(mappedBy = "tournament", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    @OneToMany(mappedBy = "tournament",
+            cascade = CascadeType.ALL,
+            fetch = FetchType.LAZY)
     private List<Player> players;
 
     public enum TournamentStatus {
-        SETUP, LOBBY, LIVE, COMPLETED
+        SETUP,       // just created, no schedule yet
+        SCHEDULED,   // ✅ NEW — scheduled for future date
+        LOBBY,       // captains joining
+        LIVE,        // auction running
+        PAUSED,      // ✅ NEW — auction paused/postponed mid-way
+        COMPLETED,   // done
+        EXPIRED,     // ✅ NEW — reservation expired
+        CANCELLED    // ✅ NEW — organizer cancelled
+    }
+
+    // ── Helper: is this tournament still valid? ────────────────
+    public boolean isExpired() {
+        return expiresAt != null
+                && LocalDateTime.now().isAfter(expiresAt);
+    }
+
+    // ── Helper: minutes until scheduled start ─────────────────
+    public long minutesUntilStart() {
+        if (scheduledAuctionTime == null) return -1;
+        java.time.Duration d = java.time.Duration.between(
+                LocalDateTime.now(), scheduledAuctionTime);
+        return d.toMinutes();
     }
 }

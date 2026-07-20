@@ -3,6 +3,7 @@ package com.auctionx.service;
 import com.auctionx.dto.*;
 import com.auctionx.model.*;
 import com.auctionx.repository.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -13,48 +14,64 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
-/**
- * Core auction brain.
- * Controls spin → reveal → bid → sold/unsold → next player cycle.
- */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class AuctionEngineService implements AuctionTimerService.TimerExpiredCallback {
 
-    private final PlayerRepository       playerRepository;
-    private final TeamRepository         teamRepository;
-    private final TournamentRepository   tournamentRepository;
+    private final PlayerRepository        playerRepository;
+    private final TeamRepository          teamRepository;
+    private final TournamentRepository    tournamentRepository;
     private final AuctionResultRepository resultRepository;
-    private final AuctionTimerService    timerService;
-    private final DashboardService       dashboardService;
-    private final SimpMessagingTemplate  messagingTemplate;
+    private final AuctionTimerService     timerService;
+    private final DashboardService        dashboardService;
+    private final SimpMessagingTemplate   messagingTemplate;
 
-    // Live auction states — one per tournament
-    private final ConcurrentHashMap<Long, AuctionState> activeAuctions
-            = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, AuctionState>         activeAuctions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Map<Long, Integer>>   bidWarTracker  = new ConcurrentHashMap<>();
 
-    // Bid war detection: teamId → recent bid count
-    private final ConcurrentHashMap<Long, Map<Long, Integer>> bidWarTracker
-            = new ConcurrentHashMap<>();
+    // Add to AuctionEngineService fields:
+    private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
 
     // ═══════════════════════════════════════════════════════════════════
-    // 1. INITIALISE AUCTION (called from LobbyService.startAuction)
+    // 1. INIT AUCTION
     // ═══════════════════════════════════════════════════════════════════
 
     public AuctionState initAuction(Long tournamentId, AuctionSettingsDTO settings) {
 
-        Tournament tournament = tournamentRepository.findById(tournamentId)
-                .orElseThrow(() -> new RuntimeException("Tournament not found"));
+        if (activeAuctions.containsKey(tournamentId)) {
+            AuctionState existing = activeAuctions.get(tournamentId);
+            if (existing != null && existing.getIsRunning().get()) {
+                log.info("⚠️ Auction already running for tournament {}, reusing", tournamentId);
+                broadcastAuctionState(tournamentId, existing, "AUCTION_ALREADY_RUNNING");
+                return existing;
+            }
+        }
 
-        // Load all available players, sorted by tier if enabled
+        Tournament tournament = tournamentRepository.findById(tournamentId)
+                .orElseThrow(() -> new RuntimeException("Tournament not found: " + tournamentId));
+
         List<Player> players = playerRepository
                 .findByTournamentIdAndStatus(tournamentId, Player.PlayerStatus.AVAILABLE);
 
-        if (settings.getAllowTierOrder() != null && settings.getAllowTierOrder()) {
+        if (players == null || players.isEmpty()) {
+            throw new RuntimeException(
+                    "No AVAILABLE players found for tournament " + tournamentId +
+                            ". Please add players first."
+            );
+        }
+
+        boolean allowTierOrder = settings.getAllowTierOrder()       != null ? settings.getAllowTierOrder()       : true;
+        int     bidTimer       = settings.getBidTimerSeconds()      != null ? settings.getBidTimerSeconds()      : 30;
+        int     resetTimer     = settings.getBidTimerResetSeconds() != null ? settings.getBidTimerResetSeconds() : 10;
+        boolean autoSpin       = settings.getAutoSpin()             != null ? settings.getAutoSpin()             : true;
+        int     pauseBetween   = settings.getPauseBetweenPlayers()  != null ? settings.getPauseBetweenPlayers()  : 5;
+        double  bidIncrement   = tournament.getBidIncrement()       != null ? tournament.getBidIncrement()       : 10.0;
+
+        if (allowTierOrder) {
             players = sortByTier(players);
         } else {
-            Collections.shuffle(players); // random order
+            Collections.shuffle(players);
         }
 
         AuctionState state = AuctionState.builder()
@@ -62,43 +79,40 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 .remainingPlayers(new ArrayList<>(players))
                 .unsoldPlayers(new ArrayList<>())
                 .soldResults(new ArrayList<>())
-                .totalTimerSeconds(settings.getBidTimerSeconds() != null
-                        ? settings.getBidTimerSeconds() : 30)
-                .resetTimerSeconds(settings.getBidTimerResetSeconds() != null
-                        ? settings.getBidTimerResetSeconds() : 10)
-                .autoSpin(settings.getAutoSpin() != null ? settings.getAutoSpin() : true)
-                .pauseBetweenPlayersSeconds(settings.getPauseBetweenPlayers() != null
-                        ? settings.getPauseBetweenPlayers() : 5)
-                .tierOrderEnabled(settings.getAllowTierOrder() != null
-                        ? settings.getAllowTierOrder() : true)
-                .bidIncrement(tournament.getBidIncrement() != null
-                        ? tournament.getBidIncrement() : 10.0)
+                .totalTimerSeconds(bidTimer)
+                .resetTimerSeconds(resetTimer)
+                .autoSpin(autoSpin)
+                .pauseBetweenPlayersSeconds(pauseBetween)
+                .tierOrderEnabled(allowTierOrder)
+                .bidIncrement(bidIncrement)
                 .phase(AuctionState.AuctionPhase.IDLE)
+                .bidMode(BidMode.ORGANIZER_CONTROLLED)
                 .auctionStartedAt(LocalDateTime.now())
                 .build();
 
         state.getIsRunning().set(true);
+        state.getIsPaused().set(false);
+        state.getIsBidding().set(false);
+        state.getRemainingSeconds().set(0);
+
         activeAuctions.put(tournamentId, state);
         bidWarTracker.put(tournamentId, new ConcurrentHashMap<>());
 
-        log.info("🏏 Auction INITIALISED for tournament {} — {} players loaded",
-                tournamentId, players.size());
+        log.info("✅ Auction INITIALISED — tournament={} players={} timer={}s",
+                tournamentId, players.size(), bidTimer);
 
-        // Broadcast init event
         broadcastAuctionState(tournamentId, state, "AUCTION_INIT");
-
         return state;
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // 2. SPIN THE WHEEL
+    // 2. SPIN WHEEL
     // ═══════════════════════════════════════════════════════════════════
 
     public SpinResultDTO spinWheel(Long tournamentId) {
         AuctionState state = getState(tournamentId);
 
         if (state.getRemainingPlayers().isEmpty()) {
-            // Check if there are unsold players to re-auction
             if (!state.getUnsoldPlayers().isEmpty()) {
                 return startReAuction(tournamentId);
             }
@@ -112,33 +126,32 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
 
         state.setPhase(AuctionState.AuctionPhase.SPINNING);
 
-        // Pick random player from remaining pool
         Random random = new Random();
         int index = random.nextInt(state.getRemainingPlayers().size());
         Player selectedPlayer = state.getRemainingPlayers().get(index);
 
-        // Broadcast SPINNING event with wheel animation data
+        // Broadcast spinning animation data
         messagingTemplate.convertAndSend(
                 "/topic/auction/" + tournamentId + "/spin",
                 Map.of(
-                        "event",           "WHEEL_SPINNING",
-                        "wheelStopIndex",  index,
-                        "totalPlayers",    state.getRemainingPlayers().size(),
-                        "playerNames",     state.getRemainingPlayers()
+                        "event",          "WHEEL_SPINNING",
+                        "wheelStopIndex", index,
+                        "totalPlayers",   state.getRemainingPlayers().size(),
+                        "playerNames",    state.getRemainingPlayers()
                                 .stream().map(Player::getName)
                                 .collect(Collectors.toList())
                 )
         );
 
-        // After spin, reveal player (small delay handled on frontend)
         state.setCurrentPlayer(selectedPlayer);
         state.setCurrentBid(selectedPlayer.getBasePrice());
         state.setBidHistory(new ArrayList<>());
         state.setCurrentHighBidderTeamId(null);
         state.setCurrentHighBidderName(null);
+        state.setCurrentHighBidderTeamName(null);
+        state.setCurrentHighBidderTeamColor(null);
         state.setPhase(AuctionState.AuctionPhase.PLAYER_REVEAL);
 
-        // Reset bid war tracker for this player
         bidWarTracker.get(tournamentId).clear();
 
         SpinResultDTO result = buildSpinResult(selectedPlayer, index,
@@ -154,14 +167,12 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 )
         );
 
-        log.info("🎰 Wheel spun — Player revealed: {} ({})",
-                selectedPlayer.getName(), selectedPlayer.getTier());
-
+        log.info("🎰 Player revealed: {} ({})", selectedPlayer.getName(), selectedPlayer.getTier());
         return result;
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // 3. START BIDDING (after player reveal)
+    // 3. START BIDDING
     // ═══════════════════════════════════════════════════════════════════
 
     public void startBidding(Long tournamentId) {
@@ -175,10 +186,7 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.getIsBidding().set(true);
         state.getIsPaused().set(false);
 
-        // Start countdown timer
         timerService.startTimer(tournamentId, state, this);
-
-        // Broadcast bidding opened
         broadcastAuctionState(tournamentId, state, "BIDDING_STARTED");
 
         log.info("🔔 Bidding STARTED for {} — Base: ₹{}",
@@ -199,80 +207,97 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
             throw new RuntimeException("Auction is paused");
         }
 
-        // Calculate bid amount
+        // Resolve bid amount
         double bidAmount;
-        if (dto.getUseAutoIncrement() != null && dto.getUseAutoIncrement()) {
+        if (Boolean.TRUE.equals(dto.getUseAutoIncrement())) {
             bidAmount = state.getCurrentBid() + state.getBidIncrement();
-        } else {
+        } else if (dto.getBidAmount() != null) {
             bidAmount = dto.getBidAmount();
+        } else {
+            throw new RuntimeException("Bid amount is required");
         }
 
-        // Validate bid
         if (bidAmount <= state.getCurrentBid()) {
-            throw new RuntimeException("Bid must be higher than current bid: ₹" + state.getCurrentBid());
+            throw new RuntimeException(
+                    "Bid ₹" + bidAmount + " must be higher than current ₹" + state.getCurrentBid());
         }
 
-        // Check team budget
+        Player player = state.getCurrentPlayer();
+        if (player != null && bidAmount < player.getBasePrice()) {
+            throw new RuntimeException(
+                    "Bid ₹" + bidAmount + " is below base price ₹" + player.getBasePrice());
+        }
+
         Team team = teamRepository.findById(dto.getTeamId())
                 .orElseThrow(() -> new RuntimeException("Team not found"));
 
         if (team.getRemainingBudget() < bidAmount) {
-            throw new RuntimeException("Insufficient budget. Remaining: ₹" + team.getRemainingBudget());
+            throw new RuntimeException(
+                    "Insufficient budget. Remaining: ₹" + team.getRemainingBudget());
         }
 
-        // Record the bid
-        BidRecord bidRecord = BidRecord.builder()
+        // Validate captain token for self-bid mode
+        if (dto.getBidMode() == BidMode.CAPTAIN_SELF) {
+            String expected = generateCaptainToken(dto.getTeamId(), dto.getTournamentId());
+            if (!expected.equals(dto.getCaptainToken())) {
+                throw new RuntimeException("Invalid captain token — unauthorized bid");
+            }
+        }
+
+        // Record bid
+        BidRecord record = BidRecord.builder()
                 .teamId(dto.getTeamId())
-                .teamName(dto.getTeamName())
-                .captainName(dto.getCaptainName())
-                .teamColor(dto.getTeamColor())
+                .teamName(team.getTeamName())
+                .captainName(team.getCaptainName())
+                .teamColor(team.getTeamColor())
                 .amount(bidAmount)
                 .timestamp(LocalDateTime.now())
                 .timerSnapshotSeconds(state.getRemainingSeconds().get())
                 .build();
 
-        state.getBidHistory().add(bidRecord);
+        state.getBidHistory().add(record);
         state.setCurrentBid(bidAmount);
         state.setCurrentHighBidderTeamId(dto.getTeamId());
-        state.setCurrentHighBidderName(dto.getCaptainName());
+        state.setCurrentHighBidderName(team.getCaptainName());
+        state.setCurrentHighBidderTeamName(team.getTeamName());
+        state.setCurrentHighBidderTeamColor(team.getTeamColor());
 
-        // Reset timer on new bid
         timerService.resetTimer(dto.getTournamentId(), state);
 
-        // Bid war detection
         boolean isBidWar = detectBidWar(dto.getTournamentId(), dto.getTeamId());
 
-        // Build broadcast payload
         AuctionStateDTO stateDTO = buildAuctionStateDTO(state, "BID_PLACED");
         stateDTO.setIsBidWar(isBidWar);
         if (isBidWar) {
-            stateDTO.setAlertMessage("🔥 BID WAR! " + state.getCurrentHighBidderName() + " takes the lead!");
+            // Find the other team involved in the war
+            String opponentName = state.getBidHistory().stream()
+                    .filter(b -> !b.getTeamId().equals(dto.getTeamId()))
+                    .reduce((first, second) -> second) // last bid from different team
+                    .map(BidRecord::getTeamName)
+                    .orElse("opponent");
+            stateDTO.setAlertMessage(
+                    team.getTeamName() + " vs " + opponentName);
         }
 
-        messagingTemplate.convertAndSend(
-                "/topic/auction/" + dto.getTournamentId(),
-                stateDTO
-        );
+        messagingTemplate.convertAndSend("/topic/auction/" + dto.getTournamentId(), stateDTO);
 
-        log.info("💰 Bid placed: ₹{} by {} for {}",
-                bidAmount, dto.getCaptainName(), state.getCurrentPlayer().getName());
+        log.info("💰 [{}] Bid ₹{} by {} for {}",
+                dto.getBidMode(), bidAmount, team.getCaptainName(),
+                player != null ? player.getName() : "?");
 
         return stateDTO;
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // 5. TIMER EXPIRED CALLBACK → AUTO SOLD
+    // 5. TIMER EXPIRED → AUTO SOLD / UNSOLD
     // ═══════════════════════════════════════════════════════════════════
 
     @Override
     public void onTimerExpired(Long tournamentId) {
         AuctionState state = getState(tournamentId);
-
         if (state.getCurrentHighBidderTeamId() != null) {
-            // Someone bid → SOLD
             soldPlayer(tournamentId);
         } else {
-            // No bids → UNSOLD
             markUnsold(tournamentId);
         }
     }
@@ -285,9 +310,9 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         AuctionState state = getState(tournamentId);
         timerService.cancelTimer(tournamentId);
 
-        Player player = state.getCurrentPlayer();
-        Long winnerTeamId = state.getCurrentHighBidderTeamId();
-        Double soldPrice  = state.getCurrentBid();
+        Player player      = state.getCurrentPlayer();
+        Long winnerTeamId  = state.getCurrentHighBidderTeamId();
+        Double soldPrice   = state.getCurrentBid();
 
         if (player == null || winnerTeamId == null) {
             throw new RuntimeException("No active bidding session to close");
@@ -296,18 +321,18 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         Team winnerTeam = teamRepository.findById(winnerTeamId)
                 .orElseThrow(() -> new RuntimeException("Winning team not found"));
 
-        // ── Update Player ─────────────────────────────────────────────
+        // Update player
         player.setStatus(Player.PlayerStatus.SOLD);
         player.setSoldPrice(soldPrice);
         player.setTeam(winnerTeam);
         playerRepository.save(player);
 
-        // ── Update Team Budget ────────────────────────────────────────
+        // Update team budget
         winnerTeam.setSpentBudget(winnerTeam.getSpentBudget() + soldPrice);
         winnerTeam.setRemainingBudget(winnerTeam.getRemainingBudget() - soldPrice);
         teamRepository.save(winnerTeam);
 
-        // ── Persist Auction Result ────────────────────────────────────
+        // Persist result
         AuctionResult result = AuctionResult.builder()
                 .tournamentId(tournamentId)
                 .playerId(player.getId())
@@ -326,31 +351,52 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 .soldAt(LocalDateTime.now())
                 .build();
 
+        // ✅ Save bid timeline as JSON when player is sold
+        try {
+            List<Map<String, Object>> timeline = state.getBidHistory()
+                    .stream()
+                    .map(b -> {
+                        Map<String, Object> entry = new LinkedHashMap<>();
+                        entry.put("teamName",  b.getTeamName());
+                        entry.put("teamColor", b.getTeamColor() != null
+                                ? b.getTeamColor() : "#888");
+                        entry.put("amount",    b.getAmount());
+                        entry.put("second",    b.getTimerSnapshotSeconds());
+                        entry.put("isWinner",  b.getTeamId().equals(winnerTeamId));
+                        return entry;
+                    })
+                    .collect(Collectors.toList());
+
+            ObjectMapper mapper = new ObjectMapper();
+            result.setBidTimeline(mapper.writeValueAsString(timeline));
+            result.setOpeningBid(state.getBidHistory().isEmpty()
+                    ? soldPrice : state.getBidHistory().get(0).getAmount());
+            result.setFinalBid(soldPrice);
+
+        } catch (Exception e) {
+            log.warn("Could not serialize bid timeline: {}", e.getMessage());
+        }
+
+
+
         resultRepository.save(result);
         state.getSoldResults().add(result);
-
-        // ── Remove from remaining pool ────────────────────────────────
         state.getRemainingPlayers().remove(player);
-
-        // ── Update auction state ──────────────────────────────────────
         state.setPhase(AuctionState.AuctionPhase.SOLD);
         state.getIsBidding().set(false);
 
-        log.info("🔨 SOLD: {} → {} for ₹{}", player.getName(),
-                winnerTeam.getTeamName(), soldPrice);
+        log.info("🔨 SOLD: {} → {} for ₹{}", player.getName(), winnerTeam.getTeamName(), soldPrice);
 
-        // Broadcast SOLD event
+        // ✅ Build DTO BEFORE clearing — so team name/color are still in state
         AuctionStateDTO stateDTO = buildAuctionStateDTO(state, "PLAYER_SOLD");
         messagingTemplate.convertAndSend("/topic/auction/" + tournamentId, stateDTO);
 
-        // Broadcast updated dashboard
         DashboardDTO dashboard = dashboardService.buildDashboard(tournamentId);
         messagingTemplate.convertAndSend("/topic/dashboard/" + tournamentId, dashboard);
 
-        // Reset current player
+        // Clear AFTER broadcast
         clearCurrentPlayer(state);
 
-        // Auto-spin after pause if enabled
         if (state.getAutoSpin() && !state.getRemainingPlayers().isEmpty()) {
             scheduleAutoSpin(tournamentId, state.getPauseBetweenPlayersSeconds());
         }
@@ -374,7 +420,6 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         player.setStatus(Player.PlayerStatus.UNSOLD);
         playerRepository.save(player);
 
-        // Persist unsold result
         AuctionResult result = AuctionResult.builder()
                 .tournamentId(tournamentId)
                 .playerId(player.getId())
@@ -421,10 +466,8 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.getIsPaused().set(true);
         state.setPhase(AuctionState.AuctionPhase.PAUSED);
         timerService.pauseTimer(tournamentId, state);
-
         messagingTemplate.convertAndSend("/topic/auction/" + tournamentId,
                 buildAuctionStateDTO(state, "AUCTION_PAUSED"));
-
         log.info("⏸ Auction PAUSED for tournament {}", tournamentId);
     }
 
@@ -433,15 +476,13 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.getIsPaused().set(false);
         state.setPhase(AuctionState.AuctionPhase.BIDDING);
         timerService.resumeTimer(tournamentId, state);
-
         messagingTemplate.convertAndSend("/topic/auction/" + tournamentId,
                 buildAuctionStateDTO(state, "AUCTION_RESUMED"));
-
         log.info("▶ Auction RESUMED for tournament {}", tournamentId);
     }
 
     // ═══════════════════════════════════════════════════════════════════
-    // 9. RE-AUCTION UNSOLD PLAYERS
+    // 9. RE-AUCTION
     // ═══════════════════════════════════════════════════════════════════
 
     public SpinResultDTO startReAuction(Long tournamentId) {
@@ -451,7 +492,6 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
             throw new RuntimeException("No unsold players to re-auction");
         }
 
-        // Move unsold players back to remaining pool
         state.getUnsoldPlayers().forEach(p -> {
             p.setStatus(Player.PlayerStatus.AVAILABLE);
             playerRepository.save(p);
@@ -463,14 +503,13 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
 
         messagingTemplate.convertAndSend("/topic/auction/" + tournamentId,
                 Map.of(
-                        "event",         "RE_AUCTION_STARTED",
-                        "playerCount",   state.getRemainingPlayers().size(),
-                        "message",       "Re-auction starting for unsold players!"
+                        "event",       "RE_AUCTION_STARTED",
+                        "playerCount", state.getRemainingPlayers().size(),
+                        "message",     "Re-auction starting for unsold players!"
                 )
         );
 
         log.info("🔄 RE-AUCTION started — {} players", state.getRemainingPlayers().size());
-
         return spinWheel(tournamentId);
     }
 
@@ -485,27 +524,37 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.setPhase(AuctionState.AuctionPhase.COMPLETED);
         state.getIsRunning().set(false);
 
-        // Update tournament status
         tournamentRepository.findById(tournamentId).ifPresent(t -> {
             t.setStatus(Tournament.TournamentStatus.COMPLETED);
             tournamentRepository.save(t);
         });
 
-        // Build final dashboard
         DashboardDTO finalDashboard = dashboardService.buildDashboard(tournamentId);
 
         messagingTemplate.convertAndSend("/topic/auction/" + tournamentId,
                 Map.of(
                         "event",     "AUCTION_COMPLETED",
-                        "message",   "🏆 Auction Complete! All players have been auctioned.",
+                        "message",   "🏆 Auction Complete!",
                         "dashboard", finalDashboard
                 )
         );
-
-        messagingTemplate.convertAndSend(
-                "/topic/dashboard/" + tournamentId, finalDashboard);
+        messagingTemplate.convertAndSend("/topic/dashboard/" + tournamentId, finalDashboard);
 
         log.info("🏆 AUCTION COMPLETED for tournament {}", tournamentId);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 11. BID MODE
+    // ═══════════════════════════════════════════════════════════════════
+
+    public void setBidMode(Long tournamentId, BidMode mode) {
+        AuctionState state = getState(tournamentId);
+        state.setBidMode(mode);
+        messagingTemplate.convertAndSend(
+                "/topic/auction/" + tournamentId,
+                Map.of("event", "BID_MODE_CHANGED", "bidMode", mode.name())
+        );
+        log.info("Bid mode → {} for tournament {}", mode, tournamentId);
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -520,22 +569,13 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         return state;
     }
 
-    private void clearCurrentPlayer(AuctionState state) {
-        state.setCurrentPlayer(null);
-        state.setCurrentBid(null);
-        state.setCurrentHighBidderTeamId(null);
-        state.setCurrentHighBidderName(null);
-        state.setBidHistory(new ArrayList<>());
-    }
-
-    private void broadcastAuctionState(Long tournamentId,
-                                       AuctionState state, String event) {
-        messagingTemplate.convertAndSend(
-                "/topic/auction/" + tournamentId,
-                buildAuctionStateDTO(state, event)
+    public String generateCaptainToken(Long teamId, Long tournamentId) {
+        return Integer.toHexString(
+                (teamId + "_" + tournamentId + "_auctionx").hashCode()
         );
     }
 
+    // ✅ FIX: build DTO BEFORE clearing state — called before clearCurrentPlayer
     private AuctionStateDTO buildAuctionStateDTO(AuctionState state, String event) {
         Player p = state.getCurrentPlayer();
 
@@ -549,27 +589,48 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         return AuctionStateDTO.builder()
                 .tournamentId(state.getTournamentId())
                 .event(event)
-                .currentPlayerId(p != null ? p.getId()          : null)
-                .currentPlayerName(p != null ? p.getName()      : null)
-                .currentPlayerRole(p != null ? p.getRole()      : null)
-                .currentPlayerPhoto(p != null ? p.getPhotoPath(): null)
+                .currentPlayerId(p != null ? p.getId()           : null)
+                .currentPlayerName(p != null ? p.getName()       : null)
+                .currentPlayerRole(p != null ? p.getRole()       : null)
+                .currentPlayerPhoto(p != null ? p.getPhotoPath() : null)
                 .currentPlayerTier(p != null && p.getTier() != null
                         ? p.getTier().name() : null)
                 .currentPlayerBasePrice(p != null ? p.getBasePrice() : null)
                 .currentBid(state.getCurrentBid())
                 .highBidderTeamId(state.getCurrentHighBidderTeamId())
                 .highBidderCaptainName(state.getCurrentHighBidderName())
+                .highBidderTeamName(state.getCurrentHighBidderTeamName())    // ✅ FIXED
+                .highBidderTeamColor(state.getCurrentHighBidderTeamColor())  // ✅ FIXED
                 .remainingSeconds(state.getRemainingSeconds().get())
                 .totalTimerSeconds(state.getTotalTimerSeconds())
                 .phase(state.getPhase())
                 .recentBids(recentBids)
                 .playersRemaining(state.getRemainingPlayers().size())
-                .playersSold(state.getSoldResults().stream()
+                .playersSold((int) state.getSoldResults().stream()
                         .filter(r -> r.getStatus() == AuctionResult.ResultStatus.SOLD)
-                        .collect(Collectors.toList()).size())
+                        .count())
                 .playersUnsold(state.getUnsoldPlayers().size())
+                .autoSpin(state.getAutoSpin())
                 .isBidWar(false)
                 .build();
+    }
+
+    // ✅ FIX: clear team name/color too
+    private void clearCurrentPlayer(AuctionState state) {
+        state.setCurrentPlayer(null);
+        state.setCurrentBid(null);
+        state.setCurrentHighBidderTeamId(null);
+        state.setCurrentHighBidderName(null);
+        state.setCurrentHighBidderTeamName(null);   // ✅ FIXED
+        state.setCurrentHighBidderTeamColor(null);  // ✅ FIXED
+        state.setBidHistory(new ArrayList<>());
+    }
+
+    private void broadcastAuctionState(Long tournamentId, AuctionState state, String event) {
+        messagingTemplate.convertAndSend(
+                "/topic/auction/" + tournamentId,
+                buildAuctionStateDTO(state, event)
+        );
     }
 
     private SpinResultDTO buildSpinResult(Player p, int index, int total) {
@@ -598,8 +659,7 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 Player.PlayerTier.BRONZE,   3
         );
         return players.stream()
-                .sorted(Comparator.comparingInt(p ->
-                        order.getOrDefault(p.getTier(), 4)))
+                .sorted(Comparator.comparingInt(p -> order.getOrDefault(p.getTier(), 4)))
                 .collect(Collectors.toList());
     }
 
@@ -618,7 +678,7 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 Thread.sleep(delaySeconds * 1000L);
                 if (activeAuctions.containsKey(tournamentId)) {
                     spinWheel(tournamentId);
-                    Thread.sleep(3000); // 3s reveal pause
+                    Thread.sleep(3000);
                     startBidding(tournamentId);
                 }
             } catch (InterruptedException e) {

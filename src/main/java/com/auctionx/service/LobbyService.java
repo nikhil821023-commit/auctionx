@@ -21,29 +21,39 @@ import java.util.concurrent.ConcurrentHashMap;
 public class LobbyService {
 
     private final TournamentRepository tournamentRepository;
-    private final TeamRepository teamRepository;
-    private final PlayerRepository playerRepository;
+    private final TeamRepository       teamRepository;
+    private final PlayerRepository     playerRepository;
     private final SimpMessagingTemplate messagingTemplate;
 
     @Value("${lobby.min.teams:2}")
     private int minTeams;
 
-    // ── In-memory lobby state ─────────────────────────────────────────
-    // Key: tournamentId → List of active lobby sessions
-    private final Map<Long, List<LobbySession>> lobbyMap = new ConcurrentHashMap<>();
-
-    // Key: tournamentId → auction settings configured by organiser
-    private final Map<Long, AuctionSettingsDTO> settingsMap = new ConcurrentHashMap<>();
+    private final Map<Long, List<LobbySession>>  lobbyMap    = new ConcurrentHashMap<>();
+    private final Map<Long, AuctionSettingsDTO>  settingsMap = new ConcurrentHashMap<>();
 
     // ── Captain joins lobby ───────────────────────────────────────────
     public LobbyStatusDTO captainJoin(CaptainJoinDTO dto, String wsSessionId) {
-        Tournament tournament = tournamentRepository.findByJoinCode(dto.getJoinCode())
-                .orElseThrow(() -> new RuntimeException("Invalid join code"));
+        Tournament tournament;
+
+        if (dto.getJoinCode() != null && !dto.getJoinCode().isBlank()) {
+            tournament = tournamentRepository.findByJoinCode(dto.getJoinCode())
+                    .orElseThrow(() -> new RuntimeException("Invalid join code"));
+        } else if (dto.getTournamentId() != null) {
+            tournament = tournamentRepository.findById(dto.getTournamentId())
+                    .orElseThrow(() -> new RuntimeException("Tournament not found"));
+        } else {
+            throw new RuntimeException("Either joinCode or tournamentId is required");
+        }
 
         Team team = teamRepository.findById(dto.getTeamId())
                 .orElseThrow(() -> new RuntimeException("Team not found"));
 
-        // Build session
+        List<LobbySession> sessions = lobbyMap.computeIfAbsent(
+                tournament.getId(), k -> new ArrayList<>());
+
+        // Remove old session if reconnecting
+        sessions.removeIf(s -> s.getTeamId().equals(team.getId()));
+
         LobbySession session = LobbySession.builder()
                 .sessionId(wsSessionId)
                 .teamId(team.getId())
@@ -57,12 +67,11 @@ public class LobbyService {
                 .role(LobbySession.LobbyRole.CAPTAIN)
                 .build();
 
-        lobbyMap.computeIfAbsent(tournament.getId(), k -> new ArrayList<>()).add(session);
+        sessions.add(session);
 
         log.info("Captain [{}] joined lobby for tournament [{}]",
                 team.getCaptainName(), tournament.getName());
 
-        // Broadcast updated lobby to everyone
         LobbyStatusDTO status = buildLobbyStatus(tournament.getId());
         broadcastLobbyUpdate(tournament.getId(), status);
         return status;
@@ -85,7 +94,6 @@ public class LobbyService {
         lobbyMap.values().forEach(sessions ->
                 sessions.removeIf(s -> s.getSessionId().equals(wsSessionId))
         );
-        // Broadcast update to all lobbies this session was in
         lobbyMap.forEach((tid, sessions) ->
                 broadcastLobbyUpdate(tid, buildLobbyStatus(tid))
         );
@@ -93,20 +101,19 @@ public class LobbyService {
 
     // ── Organiser saves auction settings ─────────────────────────────
     public AuctionSettingsDTO saveSettings(AuctionSettingsDTO dto) {
-        // Validate
-        if (dto.getBidTimerSeconds() == null || dto.getBidTimerSeconds() < 5) {
-            dto.setBidTimerSeconds(30); // default 30s
-        }
-        if (dto.getBidTimerResetSeconds() == null) {
+        if (dto.getBidTimerSeconds() == null || dto.getBidTimerSeconds() < 5)
+            dto.setBidTimerSeconds(30);
+        if (dto.getBidTimerResetSeconds() == null)
             dto.setBidTimerResetSeconds(10);
-        }
-        if (dto.getAutoSpin() == null) dto.setAutoSpin(true);
-        if (dto.getPauseBetweenPlayers() == null) dto.setPauseBetweenPlayers(5);
-        if (dto.getAllowTierOrder() == null) dto.setAllowTierOrder(true);
+        if (dto.getAutoSpin() == null)
+            dto.setAutoSpin(true);
+        if (dto.getPauseBetweenPlayers() == null)
+            dto.setPauseBetweenPlayers(5);
+        if (dto.getAllowTierOrder() == null)
+            dto.setAllowTierOrder(true);
 
         settingsMap.put(dto.getTournamentId(), dto);
 
-        // Broadcast settings update to lobby
         LobbyStatusDTO status = buildLobbyStatus(dto.getTournamentId());
         broadcastLobbyUpdate(dto.getTournamentId(), status);
 
@@ -117,32 +124,27 @@ public class LobbyService {
     // ── Organiser starts the auction ──────────────────────────────────
     public void startAuction(Long tournamentId) {
         List<LobbySession> sessions = lobbyMap.getOrDefault(tournamentId, List.of());
-        long readyCount = sessions.stream().filter(LobbySession::getIsReady).count();
 
         if (sessions.size() < minTeams) {
             throw new RuntimeException(
                     "Need at least " + minTeams + " teams. Currently: " + sessions.size());
         }
 
-        AuctionSettingsDTO settings = settingsMap.get(tournamentId);
-        if (settings == null) {
-            throw new RuntimeException("Auction settings not configured yet");
-        }
+        // ✅ FIXED: use getSettings() — never throws, always returns defaults
+        AuctionSettingsDTO settings = getSettings(tournamentId);
 
-        // Update tournament status to LIVE
         Tournament tournament = tournamentRepository.findById(tournamentId)
                 .orElseThrow(() -> new RuntimeException("Tournament not found"));
         tournament.setStatus(Tournament.TournamentStatus.LIVE);
         tournamentRepository.save(tournament);
 
-        // Broadcast STARTING signal — frontend will navigate to auction room
         messagingTemplate.convertAndSend(
                 "/topic/lobby/" + tournamentId + "/start",
                 Map.of(
-                        "event", "AUCTION_STARTING",
+                        "event",        "AUCTION_STARTING",
                         "tournamentId", tournamentId,
-                        "message", "Auction is starting! Get ready...",
-                        "settings", settings
+                        "message",      "Auction is starting! Get ready...",
+                        "settings",     settings
                 )
         );
 
@@ -154,8 +156,14 @@ public class LobbyService {
         return buildLobbyStatus(tournamentId);
     }
 
+    // ✅ FIXED: never throws — caches defaults if nothing saved
     public AuctionSettingsDTO getSettings(Long tournamentId) {
-        return settingsMap.getOrDefault(tournamentId, defaultSettings(tournamentId));
+        AuctionSettingsDTO saved = settingsMap.get(tournamentId);
+        if (saved != null) return saved;
+
+        AuctionSettingsDTO defaults = defaultSettings(tournamentId);
+        settingsMap.put(tournamentId, defaults); // cache so next call reuses
+        return defaults;
     }
 
     // ── Internal helpers ──────────────────────────────────────────────
@@ -163,17 +171,17 @@ public class LobbyService {
         Tournament tournament = tournamentRepository.findById(tournamentId)
                 .orElseThrow(() -> new RuntimeException("Tournament not found"));
 
-        List<LobbySession> sessions = lobbyMap.getOrDefault(tournamentId, List.of());
-        long readyCount = sessions.stream().filter(LobbySession::getIsReady).count();
-        int playerCount = playerRepository.findByTournamentId(tournamentId).size();
+        List<LobbySession> sessions  = lobbyMap.getOrDefault(tournamentId, List.of());
+        long readyCount  = sessions.stream().filter(LobbySession::getIsReady).count();
+        int  playerCount = playerRepository.findByTournamentId(tournamentId).size();
 
-        AuctionSettingsDTO settings = settingsMap.getOrDefault(
-                tournamentId, defaultSettings(tournamentId));
+        // ✅ Use getSettings() so defaults are always available
+        AuctionSettingsDTO settings = getSettings(tournamentId);
 
         String lobbyState;
         if (sessions.size() < minTeams) {
             lobbyState = "WAITING";
-        } else if (readyCount == sessions.size() && settings != null) {
+        } else if (readyCount == sessions.size()) {
             lobbyState = "READY_TO_START";
         } else {
             lobbyState = "TEAMS_JOINED";
@@ -199,10 +207,7 @@ public class LobbyService {
     }
 
     private void broadcastLobbyUpdate(Long tournamentId, LobbyStatusDTO status) {
-        messagingTemplate.convertAndSend(
-                "/topic/lobby/" + tournamentId,
-                status
-        );
+        messagingTemplate.convertAndSend("/topic/lobby/" + tournamentId, status);
     }
 
     private AuctionSettingsDTO defaultSettings(Long tournamentId) {

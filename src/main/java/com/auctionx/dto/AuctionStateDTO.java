@@ -50,5 +50,6 @@ public class AuctionStateDTO {
 
     // Alert flags
     private Boolean isBidWar;           // 2 teams bidding repeatedly = true
-    private String  alertMessage;       // e.g. "BID WAR! 🔥"
+    private String  alertMessage;// e.g. "BID WAR! 🔥"
+    private Boolean autoSpin;
 }

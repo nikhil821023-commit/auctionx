@@ -6,70 +6,85 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * In-memory state of one live auction session.
- * One instance per tournament while auction is LIVE.
- * Thread-safe fields for concurrent bid handling.
- */
 @Data
-@Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@Builder
 public class AuctionState {
 
     private Long tournamentId;
 
-    // ── Current player on the block ───────────────────────────────────
-    private Player  currentPlayer;       // player being auctioned right now
-    private Double  currentBid;          // highest bid so far
+    private Player  currentPlayer;
+    private Double  currentBid;
     private Long    currentHighBidderTeamId;
-    private String  currentHighBidderName;  // captain name shown on screen
+    private String  currentHighBidderName;
 
-    // ── Bid history for this player ───────────────────────────────────
+    // Add these two lines after currentHighBidderName field:
+    private String currentHighBidderTeamName;
+    private String currentHighBidderTeamColor;
+
     @Builder.Default
     private List<BidRecord> bidHistory = new ArrayList<>();
 
-    // ── Timer ─────────────────────────────────────────────────────────
-    private Integer totalTimerSeconds;   // from settings
-    private Integer resetTimerSeconds;   // reset on new bid
+    private Integer totalTimerSeconds;
+    private Integer resetTimerSeconds;
+
+    // ✅ FIX: Use @Builder.Default so Lombok initializes these properly
+    @Builder.Default
     private AtomicInteger remainingSeconds = new AtomicInteger(0);
 
-    // ── State flags ───────────────────────────────────────────────────
     @Builder.Default
-    private AtomicBoolean isRunning  = new AtomicBoolean(false);
-    @Builder.Default
-    private AtomicBoolean isPaused   = new AtomicBoolean(false);
-    @Builder.Default
-    private AtomicBoolean isBidding  = new AtomicBoolean(false);
+    private AtomicBoolean isRunning = new AtomicBoolean(false);
 
-    // ── Auction phase ─────────────────────────────────────────────────
+    @Builder.Default
+    private AtomicBoolean isPaused = new AtomicBoolean(false);
+
+    @Builder.Default
+    private AtomicBoolean isBidding = new AtomicBoolean(false);
+
     private AuctionPhase phase;
 
+    private BidMode bidMode;  // add after phase field
+
     public enum AuctionPhase {
-        IDLE,           // waiting for spin
-        SPINNING,       // wheel is spinning
-        PLAYER_REVEAL,  // player card revealed, about to start bidding
-        BIDDING,        // timer running, bids accepted
-        PAUSED,         // organiser paused
-        SOLD,           // hammer dropped, player sold
-        UNSOLD,         // no bids / marked unsold
-        RE_AUCTION,     // re-auctioning unsold players
-        COMPLETED       // all players done
+        IDLE, SPINNING, PLAYER_REVEAL, BIDDING,
+        PAUSED, SOLD, UNSOLD, RE_AUCTION, COMPLETED
     }
 
-    // ── Player queues ─────────────────────────────────────────────────
     @Builder.Default
-    private List<Player> remainingPlayers = new ArrayList<>();   // not yet auctioned
-    @Builder.Default
-    private List<Player> unsoldPlayers    = new ArrayList<>();   // marked unsold
-    @Builder.Default
-    private List<AuctionResult> soldResults = new ArrayList<>();  // completed sales
+    private List<Player> remainingPlayers = new ArrayList<>();
 
-    // ── Settings ──────────────────────────────────────────────────────
+    @Builder.Default
+    private List<Player> unsoldPlayers = new ArrayList<>();
+
+    @Builder.Default
+    private List<AuctionResult> soldResults = new ArrayList<>();
+
     private Boolean autoSpin;
     private Integer pauseBetweenPlayersSeconds;
     private Boolean tierOrderEnabled;
     private Double  bidIncrement;
 
     private LocalDateTime auctionStartedAt;
+
+    // ✅ FIX: Safe getters that never return null
+    public AtomicInteger getRemainingSeconds() {
+        if (remainingSeconds == null) remainingSeconds = new AtomicInteger(0);
+        return remainingSeconds;
+    }
+
+    public AtomicBoolean getIsRunning() {
+        if (isRunning == null) isRunning = new AtomicBoolean(false);
+        return isRunning;
+    }
+
+    public AtomicBoolean getIsPaused() {
+        if (isPaused == null) isPaused = new AtomicBoolean(false);
+        return isPaused;
+    }
+
+    public AtomicBoolean getIsBidding() {
+        if (isBidding == null) isBidding = new AtomicBoolean(false);
+        return isBidding;
+    }
 }

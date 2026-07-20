@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 
+
 @Service
 @RequiredArgsConstructor
 public class TournamentService {
@@ -17,7 +18,13 @@ public class TournamentService {
     private final TournamentRepository tournamentRepository;
     private final FileStorageService fileStorageService;
 
-    public Tournament createTournament(TournamentDTO dto, MultipartFile logo) throws IOException {
+    // Owner info set via setters before save
+    public Tournament createTournament(TournamentDTO dto,
+                                       MultipartFile logo,
+                                       Long userId,
+                                       String userName,
+                                       String userEmail) throws IOException
+    {
         if (tournamentRepository.existsByName(dto.getName())) {
             throw new RuntimeException("Tournament name already exists");
         }
@@ -39,6 +46,11 @@ public class TournamentService {
                 .status(Tournament.TournamentStatus.SETUP)
                 .joinCode(generateJoinCode())
                 .build();
+
+        // Set creator info using setters before saving
+        tournament.setCreatedByUserId(userId);
+        tournament.setCreatedByName(userName);
+        tournament.setCreatedByEmail(userEmail);
 
         return tournamentRepository.save(tournament);
     }
@@ -63,7 +75,12 @@ public class TournamentService {
         return tournamentRepository.save(t);
     }
 
+    // Explicitly uppercase join codes
     private String generateJoinCode() {
-        return UUID.randomUUID().toString().substring(0, 6).toUpperCase();
+        return UUID.randomUUID()
+                .toString()
+                .replace("-", "")
+                .substring(0, 6)
+                .toUpperCase();
     }
 }

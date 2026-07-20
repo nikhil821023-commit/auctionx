@@ -2,15 +2,13 @@ package com.auctionx.dto;
 
 import lombok.*;
 
-/**
- * Sent by captain when joining lobby via join code
- */
 @Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Builder
 public class CaptainJoinDTO {
-    private String joinCode;        // 6-char tournament join code
-    private Long teamId;            // captain's registered team ID
+    private String joinCode;
+    private Long   teamId;
     private String captainName;
+    private Long   tournamentId;  // ← fallback when joinCode is empty
 }
