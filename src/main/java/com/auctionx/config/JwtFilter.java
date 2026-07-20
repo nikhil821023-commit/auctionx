@@ -34,6 +34,12 @@ public class JwtFilter extends OncePerRequestFilter {
                                     FilterChain chain)
             throws ServletException, IOException {
 
+        // Let CORS preflight requests through untouched — no auth applies to OPTIONS
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            chain.doFilter(request, response);
+            return;
+        }
+
         String path = request.getRequestURI();
 
         // Skip JWT check for public endpoints
