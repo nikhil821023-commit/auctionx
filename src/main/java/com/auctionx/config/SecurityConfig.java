@@ -50,9 +50,10 @@ public class SecurityConfig {
 
         CorsConfiguration configuration = new CorsConfiguration();
 
-        configuration.setAllowedOrigins(List.of(
+        configuration.setAllowedOriginPatterns(List.of(
                 "http://localhost:3000",
                 "http://localhost:5173",
+                "https://*.vercel.app",
                 "https://auctionsx.tech",
                 "https://www.auctionsx.tech"
         ));
