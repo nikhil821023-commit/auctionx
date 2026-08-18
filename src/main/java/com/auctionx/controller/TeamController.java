@@ -3,6 +3,7 @@ package com.auctionx.controller;
 import com.auctionx.dto.TeamDTO;
 import com.auctionx.dto.TeamResponseDTO;
 import com.auctionx.service.TeamService;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
@@ -15,7 +16,6 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api/teams")
 @RequiredArgsConstructor
-@CrossOrigin(origins = "*")
 @Slf4j
 public class TeamController {
 
@@ -63,6 +63,27 @@ public class TeamController {
             return ResponseEntity.ok(teamService.getTeam(id));
         } catch (Exception e) {
             return ResponseEntity.badRequest()
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * GET /api/teams/my-team?tournamentId=14
+     * Restores the logged-in captain's own team using their JWT email.
+     */
+    @GetMapping("/my-team")
+    public ResponseEntity<?> getMyTeam(
+            @RequestParam Long tournamentId,
+            HttpServletRequest request) {
+        try {
+            String email = (String) request.getAttribute("userEmail");
+            if (email == null) {
+                return ResponseEntity.status(401).body(Map.of("error", "Not authenticated"));
+            }
+            return ResponseEntity.ok(teamService.getMyTeam(tournamentId, email));
+        } catch (Exception e) {
+            log.error("getMyTeam failed for tournamentId={}: {}", tournamentId, e.getMessage());
+            return ResponseEntity.status(404)
                     .body(Map.of("error", e.getMessage()));
         }
     }
