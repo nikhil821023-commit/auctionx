@@ -83,6 +83,15 @@ public class TeamService {
         return toDTO(team);
     }
 
+
+    public TeamResponseDTO getMyTeam(Long tournamentId, String captainEmail) {
+    Team team = teamRepository
+            .findByTournamentIdAndCaptainEmail(tournamentId, captainEmail)
+            .orElseThrow(() -> new RuntimeException(
+                    "No team found for this user in this tournament"));
+    return toDTO(team);
+}
+
     // ── Entity → DTO mapper ───────────────────────────────────────────
     public TeamResponseDTO toDTO(Team team) {
         return TeamResponseDTO.builder()
