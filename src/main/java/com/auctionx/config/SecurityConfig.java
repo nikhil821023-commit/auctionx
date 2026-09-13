@@ -56,7 +56,8 @@ public class SecurityConfig {
                 "http://localhost:*",
                 "https://*.vercel.app",
                 "https://auctionsx.tech",
-                "https://www.auctionsx.tech"
+                "https://www.auctionsx.tech",
+                 "https://auctionsx.onrender.com"
         ));
 
         configuration.setAllowedMethods(List.of(
