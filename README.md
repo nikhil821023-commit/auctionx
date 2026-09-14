@@ -4,10 +4,11 @@
 
 It synchronizes bids, timers, player reveals, sold/unsold events, team budgets, dashboards, and spectator reactions across organizer, captain, spectator, and projector screens in real time.
 
-🔗 **Live Frontend:** https://auction-frontend-mocha.vercel.app/
+🔗 **Live Auction Platform:** https://auctionsx.tech/
 
+---
 
-##  Features
+# ✨ Features
 
 * 🏏 Real-time cricket player auction engine
 * ⚡ WebSocket/STOMP live bidding
@@ -51,7 +52,8 @@ It synchronizes bids, timers, player reveals, sold/unsold events, team budgets, 
 ```text
                          ┌──────────────────────┐
                          │      Frontend        │
-                         │   React / Vercel     │
+                         │   React / Vite        │
+                         │  auctionsx.tech       │
                          └──────────┬───────────┘
                                     │
                      REST APIs + WebSocket/STOMP
@@ -187,8 +189,6 @@ Used for real-time emoji reactions from spectators.
 # ⏱️ Server-Authoritative Timer
 
 One of the important design decisions in AuctionX is that the **client does not control the auction timer**.
-
-The server maintains the timer using:
 
 ```text
 AuctionTimerService
@@ -652,7 +652,7 @@ DB_PASSWORD=your_password
 
 **Never commit real passwords, JWT secrets, or database credentials to GitHub.**
 
-Use environment variables or a `.env`/deployment secret manager instead.
+Use environment variables or a deployment secret manager instead.
 
 ---
 
@@ -678,13 +678,17 @@ http://localhost:8080
 
 ---
 
-# 🌐 Live Demo
+# 🌐 Production
 
-### Frontend
+### Live Auction Platform
 
-https://auction-frontend-mocha.vercel.app/
+https://auctionsx.tech/
 
-The frontend connects to the AuctionX backend through REST APIs and WebSocket/STOMP.
+### Backend API
+
+https://auctionx-backend-aohi.onrender.com/
+
+The production frontend connects to the Spring Boot backend through REST APIs and WebSocket/STOMP.
 
 ---
 
@@ -764,5 +768,3 @@ JPA / Hibernate
 JWT
 Maven
 ```
-
-
