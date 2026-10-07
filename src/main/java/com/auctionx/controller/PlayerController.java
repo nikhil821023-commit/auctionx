@@ -3,6 +3,7 @@ package com.auctionx.controller;
 import com.auctionx.dto.BulkRemoveRequest;
 import com.auctionx.dto.PlayerDTO;
 import com.auctionx.model.Player;
+import com.auctionx.service.CricHeroesFetcherService;
 import com.auctionx.service.CricHeroesScraperService;
 import com.auctionx.service.PlayerService;
 import lombok.RequiredArgsConstructor;
@@ -22,8 +23,7 @@ import java.util.Map;
 public class PlayerController {
 
     private final PlayerService playerService;
-    private final CricHeroesScraperService cricHeroesScraperService;
-
+    private final CricHeroesFetcherService cricHeroesFetcherService;
     @PostMapping(consumes = "multipart/form-data")
     public ResponseEntity<?> addPlayer(
             @RequestPart("data") PlayerDTO dto,
@@ -175,16 +175,14 @@ public class PlayerController {
      * Player pastes their own CricHeroes profile URL
      * Returns their stats to pre-fill the add player form
      */
+
     @GetMapping("/fetch-cricheroes")
-    public ResponseEntity<?> fetchFromCricHeroes(
-            @RequestParam String url) {
+    public ResponseEntity<?> fetchFromCricHeroes(@RequestParam String url) {
         try {
-            Map<String, Object> stats =
-                    cricHeroesScraperService.fetchPlayerStats(url);
+            Map<String, Object> stats = cricHeroesFetcherService.fetchPlayerStats(url);
             return ResponseEntity.ok(stats);
         } catch (Exception e) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", e.getMessage()));
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
     }
 }
