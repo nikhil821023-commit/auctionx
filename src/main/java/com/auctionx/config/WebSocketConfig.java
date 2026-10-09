@@ -16,7 +16,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
                 "/topic/auction",  // Phase 3 - auction events
                 "/topic/dashboard", // Phase 3 - live dashboard
                 "/topic/spectators",
-                "/topic/reactions"
+                "/topic/reactions",
+                "/topic/draft"
         );
         // Client → Server messages use this prefix
         registry.setApplicationDestinationPrefixes("/app");

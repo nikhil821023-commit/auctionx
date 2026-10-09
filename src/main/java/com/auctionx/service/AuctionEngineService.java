@@ -6,6 +6,7 @@ import com.auctionx.repository.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 
@@ -26,6 +27,9 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
     private final AuctionTimerService     timerService;
     private final DashboardService        dashboardService;
     private final SimpMessagingTemplate   messagingTemplate;
+
+    @Autowired(required = false)
+    private DraftModeService draftModeService;
 
     private final ConcurrentHashMap<Long, AuctionState>         activeAuctions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, Map<Long, Integer>>   bidWarTracker  = new ConcurrentHashMap<>();
@@ -380,6 +384,24 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
 
 
         resultRepository.save(result);
+
+        // ADD THIS AFTER SAVING AuctionResult
+        if (draftModeService != null) {
+            try {
+                draftModeService.recordDraftSold(
+                        tournamentId,
+                        state.getCurrentPlayer().getId(),
+                        winnerTeamId,
+                        soldPrice,
+                        state.getBidHistory().size()
+                );
+            } catch (Exception e) {
+                log.warn("Draft sync failed: {}", e.getMessage());
+            }
+        }
+
+
+
         state.getSoldResults().add(result);
         state.getRemainingPlayers().remove(player);
         state.setPhase(AuctionState.AuctionPhase.SOLD);
@@ -434,6 +456,17 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 .build();
 
         resultRepository.save(result);
+
+        if (draftModeService != null) {
+            try {
+                draftModeService.recordDraftUnsold(
+                        tournamentId,
+                        state.getCurrentPlayer().getId()
+                );
+            } catch (Exception e) {
+                log.warn("Draft unsold sync failed: {}", e.getMessage());
+            }
+        }
 
         state.getRemainingPlayers().remove(player);
         state.getUnsoldPlayers().add(player);
