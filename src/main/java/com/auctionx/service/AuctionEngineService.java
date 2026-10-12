@@ -143,7 +143,6 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.setCurrentPlayer(selectedPlayer);
         // ✅ FIX: Set currentBid to base price so first bid at base price is valid
         state.setCurrentBid(null); // null = no bid placed yet
-        state.setCurrentBidIsBaseline(true); // internal flag
         state.setBidHistory(new ArrayList<>());
         state.setCurrentHighBidderTeamId(null);
         state.setCurrentHighBidderName(null);
@@ -262,7 +261,7 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                 throw new RuntimeException(
                         "Bid ₹" + (long) bidAmount
                                 + " must be higher than current bid ₹"
-                                + (long) state.getCurrentBid()
+                                +  state.getCurrentBid().longValue()
                                 + ". Add at least ₹1 more.");
             }
         }
