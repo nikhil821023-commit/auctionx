@@ -143,6 +143,7 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
         state.setCurrentPlayer(selectedPlayer);
         // ✅ FIX: Set currentBid to base price so first bid at base price is valid
         state.setCurrentBid(null); // null = no bid placed yet
+        state.setCurrentBidIsBaseline(true); // internal flag
         state.setBidHistory(new ArrayList<>());
         state.setCurrentHighBidderTeamId(null);
         state.setCurrentHighBidderName(null);
@@ -216,14 +217,19 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
 
         double basePrice = player.getBasePrice() != null ? player.getBasePrice() : 0;
 
-        // ✅ FIX: isFirstBid = no one has bid yet (bid history is empty)
+        // ✅ KEY FIX:
+        // isFirstBid = bid history is empty = nobody has placed a real bid yet
+        // currentBid is set to basePrice by startBidding() for UI display
+        // but that does NOT count as a real bid
         boolean isFirstBid = state.getBidHistory() == null
                 || state.getBidHistory().isEmpty();
 
         // Resolve bid amount
         double bidAmount;
         if (Boolean.TRUE.equals(dto.getUseAutoIncrement())) {
-            // Auto-increment: if first bid → base price, else current + increment
+            // Auto-increment:
+            // first bid  → exactly base price
+            // later bids → current + increment
             bidAmount = isFirstBid
                     ? basePrice
                     : state.getCurrentBid() + state.getBidIncrement();
@@ -233,21 +239,32 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
             throw new RuntimeException("Bid amount is required");
         }
 
-        // ✅ FIX: Validation logic
-        // First bid  → must be >= base price  (equal is fine: bid 5 on base 5 ✅)
-        // Later bids → must be >  current bid (strictly higher)
+        // ✅ VALIDATION:
+        // First bid  → bidAmount >= basePrice
+        //              e.g. base=5, bid=5  → 5 >= 5 → ✅ VALID
+        //              e.g. base=5, bid=4  → 4 >= 5 → ❌ REJECTED
+        //
+        // Later bids → bidAmount > currentBid (strictly higher)
+        //              e.g. current=5, bid=6 → 6 > 5 → ✅ VALID
+        //              e.g. current=5, bid=5 → 5 > 5 → ❌ REJECTED
         if (isFirstBid) {
             if (bidAmount < basePrice) {
                 throw new RuntimeException(
-                        "Bid ₹" + (long) bidAmount
-                                + " must be at least base price ₹" + (long) basePrice);
+                        "First bid must be at least base price ₹"
+                                + (long) basePrice
+                                + ". You bid ₹" + (long) bidAmount);
             }
         } else {
-            if (bidAmount <= state.getCurrentBid()) {
+            // NOT <= , use strictly <  so equal to current fails
+            // current=5, bid=5 → 5 < 5 → false → this block NOT entered → but we need it to fail
+            // So keep > check: bidAmount > currentBid → if false → reject
+            if (!(bidAmount > state.getCurrentBid())) {
                 throw new RuntimeException(
                         "Bid ₹" + (long) bidAmount
                                 + " must be higher than current bid ₹"
-                                + state.getCurrentBid().longValue());            }
+                                + (long) state.getCurrentBid()
+                                + ". Add at least ₹1 more.");
+            }
         }
 
         // Budget check
