@@ -2,6 +2,7 @@ package com.auctionx.dto;
 
 import lombok.*;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Live dashboard state — one TeamCard per team.
@@ -13,12 +14,14 @@ import java.util.List;
 @Builder
 public class DashboardDTO {
 
-    private Long   tournamentId;
-    private String tournamentName;
+    private Long    tournamentId;
+    private String  tournamentName;
     private Integer totalPlayersInPool;
     private Integer playersSold;
     private Integer playersUnsold;
     private Integer playersRemaining;
+    private Integer maxPlayersPerTeam;   // ✅ NEW (outer level)
+    private Double  bidIncrement;        // ✅ NEW (outer level)
 
     private List<TeamCard> teams;
     private List<AuctionFeedItem> recentActivity; // last 20 sold/unsold events
@@ -41,6 +44,12 @@ public class DashboardDTO {
 
         private Integer playerCount;
         private List<PlayerMini> players;   // players won so far
+
+        // ✅ NEW — squad progress (these belong on the team, not the outer class)
+        private Integer playersBought;
+        private Integer playersNeeded;
+        private Integer maxPlayers;
+        private List<Map<String, Object>> recentPlayers;  // last 5 bought
     }
 
     @Data

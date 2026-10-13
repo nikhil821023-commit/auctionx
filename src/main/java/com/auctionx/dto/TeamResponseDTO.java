@@ -22,4 +22,8 @@ public class TeamResponseDTO {
     private Double spentBudget;
     private Double remainingBudget;
     private Long   tournamentId;
+    // In TeamResponseDTO.java or wherever team data is built:
+    private Integer playersBought;   // ✅ ADD — count of SOLD players for this team
+    private Integer squadCount;      // same thing, either name works
+
 }

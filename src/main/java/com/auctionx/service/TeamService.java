@@ -2,8 +2,10 @@ package com.auctionx.service;
 
 import com.auctionx.dto.TeamDTO;
 import com.auctionx.dto.TeamResponseDTO;
+import com.auctionx.model.AuctionResult;
 import com.auctionx.model.Team;
 import com.auctionx.model.Tournament;
+import com.auctionx.repository.AuctionResultRepository;
 import com.auctionx.repository.TeamRepository;
 import com.auctionx.repository.TournamentRepository;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +25,7 @@ public class TeamService {
     private final TeamRepository         teamRepository;
     private final TournamentRepository   tournamentRepository;
     private final FileStorageService     fileStorageService;
+    private final AuctionResultRepository auctionResultRepository; // ✅ ADD
 
     public TeamResponseDTO registerTeam(TeamDTO dto, MultipartFile logo)
             throws IOException {
@@ -30,7 +33,8 @@ public class TeamService {
         if (teamRepository.existsByTeamNameAndTournamentId(
                 dto.getTeamName(), dto.getTournamentId())) {
             throw new RuntimeException(
-                    "Team name '" + dto.getTeamName() + "' already taken in this tournament");
+                    "Team name '" + dto.getTeamName()
+                            + "' already taken in this tournament");
         }
 
         Tournament tournament = tournamentRepository
@@ -72,28 +76,50 @@ public class TeamService {
 
     public TeamResponseDTO getTeam(Long id) {
         Team team = teamRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Team not found: " + id));
+                .orElseThrow(() ->
+                        new RuntimeException("Team not found: " + id));
         return toDTO(team);
     }
 
-    // ── Internal refresh (used by AuctionEngine after budget update) ──
     public TeamResponseDTO refreshBudget(Long teamId) {
         Team team = teamRepository.findById(teamId)
-                .orElseThrow(() -> new RuntimeException("Team not found"));
+                .orElseThrow(() ->
+                        new RuntimeException("Team not found"));
         return toDTO(team);
     }
 
+    public TeamResponseDTO getMyTeam(Long tournamentId,
+                                     String captainEmail) {
+        Team team = teamRepository
+                .findByTournamentIdAndCaptainEmail(
+                        tournamentId, captainEmail)
+                .orElseThrow(() -> new RuntimeException(
+                        "No team found for this user in this tournament"));
+        return toDTO(team);
+    }
 
-    public TeamResponseDTO getMyTeam(Long tournamentId, String captainEmail) {
-    Team team = teamRepository
-            .findByTournamentIdAndCaptainEmail(tournamentId, captainEmail)
-            .orElseThrow(() -> new RuntimeException(
-                    "No team found for this user in this tournament"));
-    return toDTO(team);
-}
-
-    // ── Entity → DTO mapper ───────────────────────────────────────────
+    // ── Entity → DTO mapper ───────────────────────────────────────
     public TeamResponseDTO toDTO(Team team) {
+
+        Long tournamentId = team.getTournament() != null
+                ? team.getTournament().getId() : null;
+
+        // ✅ Count how many players this team has bought
+        int playersBought = 0;
+        if (tournamentId != null) {
+            try {
+                playersBought = (int) auctionResultRepository
+                        .countByTeamIdAndTournamentIdAndStatus(
+                                team.getId(),
+                                tournamentId,
+                                AuctionResult.ResultStatus.SOLD
+                        );
+            } catch (Exception e) {
+                // safe fallback — count stays 0
+                playersBought = 0;
+            }
+        }
+
         return TeamResponseDTO.builder()
                 .id(team.getId())
                 .teamName(team.getTeamName())
@@ -103,11 +129,13 @@ public class TeamService {
                 .teamColor(team.getTeamColor())
                 .logoPath(team.getLogoPath())
                 .totalBudget(team.getTotalBudget())
-                .spentBudget(team.getSpentBudget() != null ? team.getSpentBudget() : 0.0)
+                .spentBudget(team.getSpentBudget() != null
+                        ? team.getSpentBudget() : 0.0)
                 .remainingBudget(team.getRemainingBudget() != null
-                        ? team.getRemainingBudget() : team.getTotalBudget())
-                .tournamentId(team.getTournament() != null
-                        ? team.getTournament().getId() : null)
+                        ? team.getRemainingBudget()
+                        : team.getTotalBudget())
+                .tournamentId(tournamentId)
+                .playersBought(playersBought) // ✅ ADD
                 .build();
     }
 }

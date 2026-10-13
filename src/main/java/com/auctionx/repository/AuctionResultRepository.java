@@ -32,4 +32,14 @@ public interface AuctionResultRepository extends JpaRepository<AuctionResult, Lo
             Long tournamentId,
             AuctionResult.ResultStatus status
     );
+
+    // Add to AuctionResultRepository:
+    List<AuctionResult> findByTeamIdAndTournamentIdAndStatus(
+            Long teamId,
+            Long tournamentId,
+            AuctionResult.ResultStatus status
+    );
+
+    long countByTournamentIdAndStatus(
+            Long tournamentId, AuctionResult.ResultStatus status);
 }
