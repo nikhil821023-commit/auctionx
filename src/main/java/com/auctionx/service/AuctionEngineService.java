@@ -265,6 +265,53 @@ public class AuctionEngineService implements AuctionTimerService.TimerExpiredCal
                             + ", Bid: ₹" + (long) bidAmount);
         }
 
+
+        // ── Smart Budget Cap validation ───────────────────────────────────
+// After the existing budget check, ADD this block:
+
+// How many players does this team still need?
+        int maxSquadSize = 11; // default — can come from tournament settings
+        try {
+            Tournament tourney = tournamentRepository
+                    .findById(dto.getTournamentId())
+                    .orElse(null);
+            if (tourney != null && tourney.getMaxPlayersPerTeam() != null) {
+                maxSquadSize = tourney.getMaxPlayersPerTeam();
+            }
+        } catch (Exception ignored) {}
+
+// How many has this team already bought?
+        long playersBought = resultRepository
+                .countByTeamIdAndTournamentIdAndStatus(
+                        dto.getTeamId(),
+                        dto.getTournamentId(),
+                        AuctionResult.ResultStatus.SOLD
+                );
+
+        long playersStillNeeded = maxSquadSize - playersBought;
+
+// Reserve budget for remaining players (excluding current one)
+// They need at least (playersStillNeeded - 1) more players at base price
+        if (playersStillNeeded > 1) {
+            double minBasePrice = player.getBasePrice() != null
+                    ? player.getBasePrice() : 0;
+            double reservedBudget = (playersStillNeeded - 1) * minBasePrice;
+            double maxAllowedBid  = remaining - reservedBudget;
+
+            if (bidAmount > maxAllowedBid) {
+                throw new RuntimeException(
+                        "Budget cap exceeded! You need "
+                                + (playersStillNeeded - 1)
+                                + " more players after this at ₹"
+                                + (long) minBasePrice + " each."
+                                + " Max you can bid: ₹" + (long) maxAllowedBid
+                                + " (₹" + (long) reservedBudget
+                                + " reserved for remaining squad)."
+                );
+            }
+        }
+// If playersStillNeeded <= 1, no reservation needed — spend freely
+
         // Validate captain token for self-bid mode
         if (dto.getBidMode() == BidMode.CAPTAIN_SELF) {
             String expected = generateCaptainToken(dto.getTeamId(), dto.getTournamentId());

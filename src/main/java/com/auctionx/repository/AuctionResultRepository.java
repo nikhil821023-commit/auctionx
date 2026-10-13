@@ -25,4 +25,11 @@ public interface AuctionResultRepository extends JpaRepository<AuctionResult, Lo
     @Query("SELECT COUNT(r) FROM AuctionResult r " +
             "WHERE r.teamId = :teamId AND r.status = 'SOLD'")
     Integer countPlayersByTeam(Long teamId);
+
+    // Add to AuctionResultRepository.java:
+    long countByTeamIdAndTournamentIdAndStatus(
+            Long teamId,
+            Long tournamentId,
+            AuctionResult.ResultStatus status
+    );
 }
